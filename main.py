@@ -59,15 +59,30 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
-    background_tasks.add_task(process_call, contact_id)
+    # GHL call-completed webhooks often include the recording URL directly in
+    # customData — use it to avoid a separate API call that requires the
+    # conversations.readonly scope on the token.
+    recording_url = (
+        custom_data.get("Recording URL")
+        or custom_data.get("recordingUrl")
+        or custom_data.get("recording_url")
+        or payload.get("recordingUrl")
+        or payload.get("recording_url")
+    ) or None
+
+    background_tasks.add_task(process_call, contact_id, recording_url)
     return {"status": "accepted", "contactId": contact_id}
 
 
-async def process_call(contact_id: str):
-    print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
-    await asyncio.sleep(RECORDING_DELAY)
+async def process_call(contact_id: str, recording_url: str | None = None):
+    if recording_url:
+        print(f"[{contact_id}] Recording URL from webhook payload — skipping GHL API search")
+        audio_url = recording_url
+    else:
+        print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
+        await asyncio.sleep(RECORDING_DELAY)
+        audio_url = await get_recording_url(contact_id)
 
-    audio_url = await get_recording_url(contact_id)
     if not audio_url:
         print(f"[{contact_id}] No recording URL found — aborting")
         return
