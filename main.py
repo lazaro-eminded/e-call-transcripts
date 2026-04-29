@@ -31,9 +31,67 @@ def ghl_headers(version: str = "2021-04-15") -> dict:
     }
 
 
+_AUDIO_EXTENSIONS = (".mp3", ".mp4", ".wav", ".ogg", ".m4a", ".webm", ".aac")
+
+
+def _looks_like_audio_url(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    v = value.lower()
+    return v.startswith("http") and (
+        any(v.endswith(ext) for ext in _AUDIO_EXTENSIONS)
+        or "recording" in v
+        or "twilio.com/2010" in v
+        or "calltools" in v
+        or "storage.googleapis" in v
+        or "s3.amazonaws" in v
+    )
+
+
+def _find_recording_url(payload: dict, custom_data: dict) -> str | None:
+    # Explicit well-known keys first
+    candidates = [
+        payload.get("recordingUrl"),
+        payload.get("recording_url"),
+        payload.get("Call Tools Call"),
+        payload.get("subir llamada"),
+        payload.get("Last Call"),
+        custom_data.get("Recording URL"),
+        custom_data.get("recordingUrl"),
+        custom_data.get("recording_url"),
+        custom_data.get("Call Tools Call"),
+        custom_data.get("subir llamada"),
+        custom_data.get("Last Call"),
+    ]
+    for v in candidates:
+        if _looks_like_audio_url(v):
+            return v
+
+    # Fallback: scan all top-level and customData values for anything that
+    # looks like an audio URL
+    for source in (payload, custom_data):
+        for k, v in source.items():
+            if _looks_like_audio_url(v):
+                print(f"[payload-scan] Found audio URL in field {k!r}: {v}")
+                return v
+
+    return None
+
+
 @app.get("/")
 async def health():
     return {"status": "ok", "service": "e-call-transcripts"}
+
+
+@app.post("/webhook/debug")
+async def debug_webhook(request: Request):
+    """Dump the full payload to logs — use this to inspect what GHL sends."""
+    payload = await request.json()
+    print("=== DEBUG PAYLOAD ===")
+    for k, v in payload.items():
+        print(f"  {k!r}: {v!r}")
+    print("=== END PAYLOAD ==="    )
+    return {"received_keys": list(payload.keys()), "payload": payload}
 
 
 @app.post("/webhook/call-completed")
@@ -63,14 +121,11 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
-    # Use recording URL from payload if GHL includes it directly
-    recording_url = (
-        payload.get("recordingUrl")
-        or payload.get("recording_url")
-        or custom_data.get("Recording URL")
-        or custom_data.get("recordingUrl")
-        or custom_data.get("recording_url")
-    )
+    # Use recording URL from payload if GHL/Call Tools includes it directly.
+    # We search both the top-level payload and customData for any key that
+    # looks like a URL pointing to an audio file.
+    recording_url = _find_recording_url(payload, custom_data)
+    print(f"[{contact_id}] Recording URL from payload: {recording_url!r}")
 
     background_tasks.add_task(process_call, contact_id, recording_url)
     return {"status": "accepted", "contactId": contact_id}
