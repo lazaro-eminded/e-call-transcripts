@@ -269,6 +269,9 @@ async def get_recording_url(contact_id: str) -> str | None:
                 call_meta = meta.get("call") or {}
                 attachments = msg.get("attachments") or []
                 body = msg.get("body") or ""
+                alt_id = msg.get("altId") or ""  # Twilio Call SID (CA...)
+                conv_id_msg = msg.get("conversationId") or conv_id
+
                 url = (
                     call_meta.get("url")
                     or call_meta.get("recordingUrl")
@@ -282,14 +285,57 @@ async def get_recording_url(contact_id: str) -> str | None:
                     or (attachments[0] if attachments and isinstance(attachments[0], str) else None)
                     or (body if body.startswith("http") else None)
                 )
+
+                # Try GHL recording endpoints using the Twilio Call SID (altId)
+                if not url and alt_id.startswith("CA"):
+                    url = await fetch_recording_via_call_sid(client, contact_id, alt_id, conv_id_msg, msg_id)
+
                 if url:
                     print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
                     return url
                 else:
                     call_duration = call_meta.get("duration", 0)
-                    print(f"[{contact_id}]   Call (duration={call_duration}s) — no recording URL in any field")
+                    print(f"[{contact_id}]   Call (duration={call_duration}s, altId={alt_id!r}) — no recording URL")
 
     print(f"[{contact_id}] No call recording found in any conversation")
+    return None
+
+
+async def fetch_recording_via_call_sid(
+    client: httpx.AsyncClient,
+    contact_id: str,
+    call_sid: str,
+    conv_id: str,
+    msg_id: str | None,
+) -> str | None:
+    """Try GHL-specific endpoints that may expose the recording URL via Twilio Call SID."""
+    candidates = [
+        # GHL phone-call recording proxy
+        (f"{GHL_BASE}/phone-call/recording", {"callSid": call_sid, "locationId": GHL_LOCATION_ID}),
+        (f"{GHL_BASE}/phone-call/{call_sid}/recording", {}),
+        # Conversations message recording
+        (f"{GHL_BASE}/conversations/{conv_id}/messages/{msg_id}/recording", {}) if msg_id else None,
+        # Generic calls endpoint
+        (f"{GHL_BASE}/calls/{call_sid}/recordings", {}),
+    ]
+    for entry in candidates:
+        if entry is None:
+            continue
+        endpoint, params = entry
+        try:
+            r = await client.get(endpoint, headers=ghl_headers(), params=params or None)
+            print(f"[{contact_id}]   Recording probe {endpoint} → {r.status_code}: {r.text[:200]}")
+            if r.status_code == 200:
+                data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                url = (
+                    data.get("url")
+                    or data.get("recordingUrl")
+                    or data.get("recording_url")
+                )
+                if url:
+                    return url
+        except Exception as e:
+            print(f"[{contact_id}]   Recording probe {endpoint} error: {e}")
     return None
 
 
