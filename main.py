@@ -19,6 +19,9 @@ RECORDING_DELAY = int(os.getenv("RECORDING_DELAY_SECONDS", "60"))
 
 GHL_BASE = "https://services.leadconnectorhq.com"
 
+# GHL message type IDs that represent calls
+CALL_TYPE_IDS = {"10", "TYPE_CALL"}
+
 
 def ghl_headers(version: str = "2021-04-15") -> dict:
     return {
@@ -36,6 +39,7 @@ async def health():
 @app.post("/webhook/call-completed")
 async def call_completed(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
+    print(f"[webhook] Received payload keys: {list(payload.keys())}")
 
     custom_data = payload.get("customData", {})
     duration_raw = custom_data.get("Call Duration", "0")
@@ -59,21 +63,33 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
-    background_tasks.add_task(process_call, contact_id)
+    # Use recording URL from payload if GHL includes it directly
+    recording_url = (
+        payload.get("recordingUrl")
+        or payload.get("recording_url")
+        or custom_data.get("Recording URL")
+        or custom_data.get("recordingUrl")
+        or custom_data.get("recording_url")
+    )
+
+    background_tasks.add_task(process_call, contact_id, recording_url)
     return {"status": "accepted", "contactId": contact_id}
 
 
-async def process_call(contact_id: str):
-    print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
-    await asyncio.sleep(RECORDING_DELAY)
+async def process_call(contact_id: str, recording_url: str | None = None):
+    if recording_url:
+        print(f"[{contact_id}] Recording URL from webhook payload: {recording_url}")
+    else:
+        print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
+        await asyncio.sleep(RECORDING_DELAY)
+        recording_url = await get_recording_url(contact_id)
 
-    audio_url = await get_recording_url(contact_id)
-    if not audio_url:
+    if not recording_url:
         print(f"[{contact_id}] No recording URL found — aborting")
         return
 
-    print(f"[{contact_id}] Transcribing: {audio_url}")
-    transcript = await transcribe(audio_url)
+    print(f"[{contact_id}] Transcribing: {recording_url}")
+    transcript = await transcribe(recording_url)
     if not transcript:
         print(f"[{contact_id}] Empty transcription — aborting")
         return
@@ -83,39 +99,73 @@ async def process_call(contact_id: str):
 
 
 async def get_recording_url(contact_id: str) -> str | None:
+    """
+    Finds the most recent call recording URL for a contact by:
+    1. Searching conversations for the contact
+    2. Fetching messages for each conversation via /conversations/{id}/messages
+    3. Returning the URL from the most recent call message that has a recording
+    """
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{GHL_BASE}/conversations/search",
             headers=ghl_headers(),
-            params={"locationId": GHL_LOCATION_ID, "contactId": contact_id},
+            params={"locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 10},
         )
 
-    if resp.status_code != 200:
-        print(f"[{contact_id}] GHL search error {resp.status_code}: {resp.text[:300]}")
-        return None
+        if resp.status_code != 200:
+            print(f"[{contact_id}] GHL conversations search error {resp.status_code}: {resp.text[:300]}")
+            return None
 
-    data = resp.json()
-    conversations = data.get("conversations", [])
+        data = resp.json()
+        conversations = data.get("conversations", [])
 
-    for conv in conversations:
-        messages = conv.get("messages", [])
-        # GHL sometimes wraps messages in a nested dict
-        if isinstance(messages, dict):
-            messages = messages.get("messages", [])
+        if not conversations:
+            print(f"[{contact_id}] No conversations found for contact")
+            return None
 
-        for msg in messages:
-            msg_type = str(msg.get("type") or msg.get("messageType") or "").upper()
-            if "CALL" in msg_type:
-                meta = msg.get("meta", {})
-                url = (
-                    meta.get("url")
-                    or meta.get("recordingUrl")
-                    or msg.get("url")
-                    or msg.get("recordingUrl")
-                )
-                if url:
-                    return url
+        # Iterate conversations (already sorted by lastMessage desc in GHL)
+        for conv in conversations:
+            conv_id = conv.get("id")
+            if not conv_id:
+                continue
 
+            msg_resp = await client.get(
+                f"{GHL_BASE}/conversations/{conv_id}/messages",
+                headers=ghl_headers(),
+                params={"limit": 50},
+            )
+
+            if msg_resp.status_code != 200:
+                print(f"[{contact_id}] Messages fetch error for conv {conv_id}: {msg_resp.status_code}")
+                continue
+
+            msg_data = msg_resp.json()
+            # GHL wraps messages in a nested object: { messages: { messages: [...] } }
+            messages = msg_data.get("messages", [])
+            if isinstance(messages, dict):
+                messages = messages.get("messages", [])
+
+            # Sort by dateAdded descending so we pick the most recent call
+            messages = sorted(messages, key=lambda m: m.get("dateAdded", ""), reverse=True)
+
+            for msg in messages:
+                raw_type = str(msg.get("type") or msg.get("messageType") or "").upper()
+                is_call = "CALL" in raw_type or raw_type in CALL_TYPE_IDS
+
+                if is_call:
+                    meta = msg.get("meta") or {}
+                    url = (
+                        meta.get("url")
+                        or meta.get("recordingUrl")
+                        or meta.get("recording_url")
+                        or msg.get("url")
+                        or msg.get("recordingUrl")
+                    )
+                    if url:
+                        print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
+                        return url
+
+    print(f"[{contact_id}] No call recording found in any conversation")
     return None
 
 
