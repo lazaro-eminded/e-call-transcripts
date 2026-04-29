@@ -246,8 +246,11 @@ async def get_recording_url(contact_id: str) -> str | None:
                     print(f"[{contact_id}]   msg type={raw_type!r} meta={msg.get('meta')}")
 
                 if is_call:
+                    print(f"[{contact_id}]   CALL msg completo: {msg}")
                     meta = msg.get("meta") or {}
                     call_meta = meta.get("call") or {}
+                    attachments = msg.get("attachments") or []
+                    body = msg.get("body") or ""
                     url = (
                         call_meta.get("url")
                         or call_meta.get("recordingUrl")
@@ -257,6 +260,9 @@ async def get_recording_url(contact_id: str) -> str | None:
                         or meta.get("recording_url")
                         or msg.get("url")
                         or msg.get("recordingUrl")
+                        or (attachments[0].get("url") if attachments and isinstance(attachments[0], dict) else None)
+                        or (attachments[0] if attachments and isinstance(attachments[0], str) else None)
+                        or (body if body.startswith("http") else None)
                     )
                     if url:
                         print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
