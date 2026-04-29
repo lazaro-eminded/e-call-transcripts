@@ -288,9 +288,9 @@ async def get_recording_url(contact_id: str) -> str | None:
                     or (body if body.startswith("http") else None)
                 )
 
-                # Try GHL recording endpoints using the Twilio Call SID (altId)
-                if not url and alt_id.startswith("CA"):
-                    url = await fetch_recording_via_call_sid(client, contact_id, alt_id, conv_id_msg, msg_id)
+                # Use the official GHL recording endpoint
+                if not url and msg_id:
+                    url = await fetch_recording_by_message_id(client, contact_id, msg_id)
 
                 if url:
                     print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
@@ -299,67 +299,37 @@ async def get_recording_url(contact_id: str) -> str | None:
                     call_duration = call_meta.get("duration", 0)
                     print(f"[{contact_id}]   Call (duration={call_duration}s, altId={alt_id!r}) — no recording URL")
 
-    print(f"[{contact_id}] No call recording found in any conversation — trying calls API...")
-    return await fetch_recording_via_calls_api(contact_id)
-
-
-async def fetch_recording_via_calls_api(contact_id: str) -> str | None:
-    """Try GHL's calls/reporting API which may expose recording URLs."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        for endpoint, params in [
-            (f"{GHL_BASE}/calls", {"locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 5}),
-            (f"{GHL_BASE}/reporting/calls", {"locationId": GHL_LOCATION_ID, "contactId": contact_id}),
-            (f"{GHL_BASE}/phone-call", {"locationId": GHL_LOCATION_ID, "contactId": contact_id}),
-        ]:
-            try:
-                r = await client.get(endpoint, headers=ghl_headers(), params=params)
-                print(f"[{contact_id}] Calls API {endpoint} → {r.status_code}: {r.text[:300]}")
-                if r.status_code == 200:
-                    data = r.json()
-                    # Try to find a recording URL anywhere in the response
-                    text = r.text
-                    if "recordingUrl" in text or "recording_url" in text or "recordingurl" in text.lower():
-                        print(f"[{contact_id}] Possible recording URL in response — full: {text[:500]}")
-            except Exception as e:
-                print(f"[{contact_id}] Calls API {endpoint} error: {e}")
+    print(f"[{contact_id}] No call recording found in any conversation")
     return None
 
 
-async def fetch_recording_via_call_sid(
+async def fetch_recording_by_message_id(
     client: httpx.AsyncClient,
     contact_id: str,
-    call_sid: str,
-    conv_id: str,
-    msg_id: str | None,
+    msg_id: str,
 ) -> str | None:
-    """Try GHL-specific endpoints that may expose the recording URL via Twilio Call SID."""
-    candidates = [
-        # GHL phone-call recording proxy
-        (f"{GHL_BASE}/phone-call/recording", {"callSid": call_sid, "locationId": GHL_LOCATION_ID}),
-        (f"{GHL_BASE}/phone-call/{call_sid}/recording", {}),
-        # Conversations message recording
-        (f"{GHL_BASE}/conversations/{conv_id}/messages/{msg_id}/recording", {}) if msg_id else None,
-        # Generic calls endpoint
-        (f"{GHL_BASE}/calls/{call_sid}/recordings", {}),
-    ]
-    for entry in candidates:
-        if entry is None:
-            continue
-        endpoint, params = entry
-        try:
-            r = await client.get(endpoint, headers=ghl_headers(), params=params or None)
-            print(f"[{contact_id}]   Recording probe {endpoint} → {r.status_code}: {r.text[:200]}")
-            if r.status_code == 200:
-                data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-                url = (
-                    data.get("url")
-                    or data.get("recordingUrl")
-                    or data.get("recording_url")
-                )
-                if url:
-                    return url
-        except Exception as e:
-            print(f"[{contact_id}]   Recording probe {endpoint} error: {e}")
+    """
+    Official GHL endpoint to get recording URL by message ID.
+    GET /conversations/messages/{messageId}/locations/{locationId}/recording
+    Requires Version: 2023-02-21
+    """
+    endpoint = f"{GHL_BASE}/conversations/messages/{msg_id}/locations/{GHL_LOCATION_ID}/recording"
+    try:
+        r = await client.get(endpoint, headers=ghl_headers(version="2023-02-21"))
+        print(f"[{contact_id}]   Recording endpoint → {r.status_code}: {r.text[:300]}")
+        if r.status_code == 200:
+            data = r.json()
+            url = (
+                data.get("url")
+                or data.get("recordingUrl")
+                or data.get("recording_url")
+                or data.get("mediaUrl")
+            )
+            if url:
+                return url
+            print(f"[{contact_id}]   Recording response: {data}")
+    except Exception as e:
+        print(f"[{contact_id}]   Recording endpoint error: {e}")
     return None
 
 
