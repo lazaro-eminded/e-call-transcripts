@@ -178,6 +178,8 @@ async def get_recording_url(contact_id: str) -> str | None:
             print(f"[{contact_id}] No conversations found for contact")
             return None
 
+        print(f"[{contact_id}] Found {len(conversations)} conversation(s)")
+
         # Iterate conversations (already sorted by lastMessage desc in GHL)
         for conv in conversations:
             conv_id = conv.get("id")
@@ -191,7 +193,7 @@ async def get_recording_url(contact_id: str) -> str | None:
             )
 
             if msg_resp.status_code != 200:
-                print(f"[{contact_id}] Messages fetch error for conv {conv_id}: {msg_resp.status_code}")
+                print(f"[{contact_id}] Messages fetch error for conv {conv_id}: {msg_resp.status_code}: {msg_resp.text[:200]}")
                 continue
 
             msg_data = msg_resp.json()
@@ -200,11 +202,16 @@ async def get_recording_url(contact_id: str) -> str | None:
             if isinstance(messages, dict):
                 messages = messages.get("messages", [])
 
+            print(f"[{contact_id}] Conv {conv_id}: {len(messages)} message(s)")
+
             # Sort by dateAdded descending so we pick the most recent call
             messages = sorted(messages, key=lambda m: m.get("dateAdded", ""), reverse=True)
 
             for msg in messages:
                 raw_type = str(msg.get("type") or msg.get("messageType") or "").upper()
+                # Log every message type so we can see exactly what GHL returns
+                print(f"[{contact_id}]   msg type={raw_type!r} meta={msg.get('meta')}")
+
                 is_call = "CALL" in raw_type or raw_type in CALL_TYPE_IDS
 
                 if is_call:
@@ -219,6 +226,8 @@ async def get_recording_url(contact_id: str) -> str | None:
                     if url:
                         print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
                         return url
+                    else:
+                        print(f"[{contact_id}]   Call message found but NO recording URL. Full msg: {msg}")
 
     print(f"[{contact_id}] No call recording found in any conversation")
     return None
