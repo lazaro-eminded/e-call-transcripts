@@ -111,14 +111,16 @@ async def debug_messages(contact_id: str):
     return result
 
 
-@app.post("/webhook/debug")
+@app.api_route("/webhook/debug", methods=["GET", "POST"])
 async def debug_webhook(request: Request):
     """Dump the full payload to logs — use this to inspect what GHL sends."""
+    if request.method == "GET":
+        return {"status": "debug endpoint active — send POST to inspect payload"}
     payload = await request.json()
     print("=== DEBUG PAYLOAD ===")
     for k, v in payload.items():
         print(f"  {k!r}: {v!r}")
-    print("=== END PAYLOAD ==="    )
+    print("=== END PAYLOAD ===")
     return {"received_keys": list(payload.keys()), "payload": payload}
 
 
