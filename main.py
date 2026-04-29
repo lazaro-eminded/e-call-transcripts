@@ -210,10 +210,13 @@ async def get_recording_url(contact_id: str) -> str | None:
 
             for msg in messages:
                 raw_type = str(msg.get("type") or msg.get("messageType") or "").upper()
-                # Log every message type so we can see exactly what GHL returns
-                print(f"[{contact_id}]   msg type={raw_type!r} meta={msg.get('meta')}")
-
                 is_call = "CALL" in raw_type or raw_type in CALL_TYPE_IDS
+
+                # Log every message type so we can see exactly what GHL returns
+                if is_call:
+                    print(f"[{contact_id}]   CALL msg completo: {msg}")
+                else:
+                    print(f"[{contact_id}]   msg type={raw_type!r} meta={msg.get('meta')}")
 
                 if is_call:
                     meta = msg.get("meta") or {}
