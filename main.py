@@ -161,12 +161,10 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
     return {"status": "accepted", "contactId": contact_id}
 
 
-async def process_call(contact_id: str, recording_url: str | None = None):
+async def process_call(contact_id: str, recording_url: str | bytes | None = None):
     if recording_url:
-        print(f"[{contact_id}] Recording URL from webhook payload: {recording_url}")
+        print(f"[{contact_id}] Recording from webhook payload")
     else:
-        # GHL needs time to process the recording after the call ends.
-        # Retry up to 3 times with increasing delays.
         delays = [
             int(os.getenv("RECORDING_DELAY_SECONDS", "60")),
             120,
@@ -178,14 +176,18 @@ async def process_call(contact_id: str, recording_url: str | None = None):
             recording_url = await get_recording_url(contact_id)
             if recording_url:
                 break
-            print(f"[{contact_id}] Attempt {attempt}: no recording URL yet")
+            print(f"[{contact_id}] Attempt {attempt}: no recording found yet")
 
     if not recording_url:
-        print(f"[{contact_id}] No recording URL found after all retries — aborting")
+        print(f"[{contact_id}] No recording found after all retries — aborting")
         return
 
-    print(f"[{contact_id}] Transcribing: {recording_url}")
-    transcript = await transcribe(recording_url)
+    if isinstance(recording_url, bytes):
+        print(f"[{contact_id}] Transcribing audio bytes ({len(recording_url)} bytes)")
+        transcript = await transcribe_bytes(recording_url)
+    else:
+        print(f"[{contact_id}] Transcribing URL: {recording_url}")
+        transcript = await transcribe(recording_url)
     if not transcript:
         print(f"[{contact_id}] Empty transcription — aborting")
         return
@@ -194,7 +196,7 @@ async def process_call(contact_id: str, recording_url: str | None = None):
     print(f"[{contact_id}] Done")
 
 
-async def get_recording_url(contact_id: str) -> str | None:
+async def get_recording_url(contact_id: str) -> str | bytes | None:
     """
     Finds the most recent call recording URL for a contact by:
     1. Searching conversations for the contact
@@ -307,27 +309,19 @@ async def fetch_recording_by_message_id(
     client: httpx.AsyncClient,
     contact_id: str,
     msg_id: str,
-) -> str | None:
+) -> bytes | None:
     """
-    Official GHL endpoint to get recording URL by message ID.
+    Official GHL endpoint: returns WAV audio bytes directly.
     GET /conversations/messages/{messageId}/locations/{locationId}/recording
-    Requires Version: 2023-02-21
+    Version: 2023-02-21
     """
     endpoint = f"{GHL_BASE}/conversations/messages/{msg_id}/locations/{GHL_LOCATION_ID}/recording"
     try:
         r = await client.get(endpoint, headers=ghl_headers(version="2023-02-21"))
-        print(f"[{contact_id}]   Recording endpoint → {r.status_code}: {r.text[:300]}")
-        if r.status_code == 200:
-            data = r.json()
-            url = (
-                data.get("url")
-                or data.get("recordingUrl")
-                or data.get("recording_url")
-                or data.get("mediaUrl")
-            )
-            if url:
-                return url
-            print(f"[{contact_id}]   Recording response: {data}")
+        content_type = r.headers.get("content-type", "")
+        print(f"[{contact_id}]   Recording endpoint → {r.status_code} content-type={content_type} size={len(r.content)}")
+        if r.status_code == 200 and len(r.content) > 1000:
+            return r.content
     except Exception as e:
         print(f"[{contact_id}]   Recording endpoint error: {e}")
     return None
@@ -356,6 +350,36 @@ async def transcribe(audio_url: str) -> str | None:
         return "\n".join(lines)
 
     # Fallback: plain transcript without diarization
+    channels = getattr(results, "channels", None) or []
+    if channels:
+        return channels[0].alternatives[0].transcript
+
+    return None
+
+
+async def transcribe_bytes(audio_bytes: bytes) -> str | None:
+    deepgram = DeepgramClient(DEEPGRAM_API_KEY)
+    options = PrerecordedOptions(
+        model="nova-2",
+        smart_format=True,
+        diarize=True,
+        punctuate=True,
+        language="es",
+    )
+    response = deepgram.listen.rest.v("1").transcribe_file(
+        {"buffer": audio_bytes, "mimetype": "audio/wav"},
+        options,
+    )
+    results = response.results
+
+    utterances = getattr(results, "utterances", None) or []
+    if utterances:
+        lines = []
+        for utt in utterances:
+            label = "Agente" if utt.speaker == 0 else "Cliente"
+            lines.append(f"{label}: {utt.transcript}")
+        return "\n".join(lines)
+
     channels = getattr(results, "channels", None) or []
     if channels:
         return channels[0].alternatives[0].transcript
