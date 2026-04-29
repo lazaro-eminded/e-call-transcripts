@@ -163,12 +163,23 @@ async def process_call(contact_id: str, recording_url: str | None = None):
     if recording_url:
         print(f"[{contact_id}] Recording URL from webhook payload: {recording_url}")
     else:
-        print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
-        await asyncio.sleep(RECORDING_DELAY)
-        recording_url = await get_recording_url(contact_id)
+        # GHL needs time to process the recording after the call ends.
+        # Retry up to 3 times with increasing delays.
+        delays = [
+            int(os.getenv("RECORDING_DELAY_SECONDS", "60")),
+            120,
+            120,
+        ]
+        for attempt, wait in enumerate(delays, start=1):
+            print(f"[{contact_id}] Attempt {attempt}: waiting {wait}s for GHL to process recording...")
+            await asyncio.sleep(wait)
+            recording_url = await get_recording_url(contact_id)
+            if recording_url:
+                break
+            print(f"[{contact_id}] Attempt {attempt}: no recording URL yet")
 
     if not recording_url:
-        print(f"[{contact_id}] No recording URL found — aborting")
+        print(f"[{contact_id}] No recording URL found after all retries — aborting")
         return
 
     print(f"[{contact_id}] Transcribing: {recording_url}")
@@ -239,37 +250,44 @@ async def get_recording_url(contact_id: str) -> str | None:
                 raw_type = str(msg.get("type") or msg.get("messageType") or "").upper()
                 is_call = "CALL" in raw_type or raw_type in CALL_TYPE_IDS
 
-                # Log every message type so we can see exactly what GHL returns
-                if is_call:
-                    print(f"[{contact_id}]   CALL msg completo: {msg}")
-                else:
-                    print(f"[{contact_id}]   msg type={raw_type!r} meta={msg.get('meta')}")
+                if not is_call:
+                    continue
 
-                if is_call:
-                    print(f"[{contact_id}]   CALL msg completo: {msg}")
-                    meta = msg.get("meta") or {}
-                    call_meta = meta.get("call") or {}
-                    attachments = msg.get("attachments") or []
-                    body = msg.get("body") or ""
-                    url = (
-                        call_meta.get("url")
-                        or call_meta.get("recordingUrl")
-                        or call_meta.get("recording_url")
-                        or meta.get("url")
-                        or meta.get("recordingUrl")
-                        or meta.get("recording_url")
-                        or msg.get("url")
-                        or msg.get("recordingUrl")
-                        or (attachments[0].get("url") if attachments and isinstance(attachments[0], dict) else None)
-                        or (attachments[0] if attachments and isinstance(attachments[0], str) else None)
-                        or (body if body.startswith("http") else None)
+                msg_id = msg.get("id")
+                # Fetch the individual message — the list endpoint may omit fields
+                if msg_id:
+                    single_resp = await client.get(
+                        f"{GHL_BASE}/conversations/{conv_id}/messages/{msg_id}",
+                        headers=ghl_headers(),
                     )
-                    if url:
-                        print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
-                        return url
-                    else:
-                        call_duration = call_meta.get("duration", 0)
-                        print(f"[{contact_id}]   Call found (duration={call_duration}s) but no recording URL")
+                    if single_resp.status_code == 200:
+                        msg = single_resp.json()
+
+                print(f"[{contact_id}]   CALL msg completo: {msg}")
+
+                meta = msg.get("meta") or {}
+                call_meta = meta.get("call") or {}
+                attachments = msg.get("attachments") or []
+                body = msg.get("body") or ""
+                url = (
+                    call_meta.get("url")
+                    or call_meta.get("recordingUrl")
+                    or call_meta.get("recording_url")
+                    or meta.get("url")
+                    or meta.get("recordingUrl")
+                    or meta.get("recording_url")
+                    or msg.get("url")
+                    or msg.get("recordingUrl")
+                    or (attachments[0].get("url") if attachments and isinstance(attachments[0], dict) else None)
+                    or (attachments[0] if attachments and isinstance(attachments[0], str) else None)
+                    or (body if body.startswith("http") else None)
+                )
+                if url:
+                    print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
+                    return url
+                else:
+                    call_duration = call_meta.get("duration", 0)
+                    print(f"[{contact_id}]   Call (duration={call_duration}s) — no recording URL in any field")
 
     print(f"[{contact_id}] No call recording found in any conversation")
     return None
