@@ -368,10 +368,16 @@ async def transcribe_bytes(audio_bytes: bytes) -> str | None:
         language="es",
     )
     response = deepgram.listen.rest.v("1").transcribe_file(
-        {"buffer": audio_bytes, "mimetype": "audio/wav"},
+        {"buffer": audio_bytes, "mimetype": "audio/x-wav"},
         options,
     )
     results = response.results
+    print(f"[deepgram-bytes] results type={type(results)} utterances={bool(getattr(results, 'utterances', None))} channels={bool(getattr(results, 'channels', None))}")
+    if results:
+        channels = getattr(results, "channels", None) or []
+        if channels:
+            alt = channels[0].alternatives[0]
+            print(f"[deepgram-bytes] transcript={alt.transcript!r} confidence={getattr(alt, 'confidence', None)}")
 
     utterances = getattr(results, "utterances", None) or []
     if utterances:
@@ -383,7 +389,9 @@ async def transcribe_bytes(audio_bytes: bytes) -> str | None:
 
     channels = getattr(results, "channels", None) or []
     if channels:
-        return channels[0].alternatives[0].transcript
+        alt = channels[0].alternatives[0]
+        if alt.transcript:
+            return alt.transcript
 
     return None
 
