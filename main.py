@@ -20,7 +20,8 @@ RECORDING_DELAY = int(os.getenv("RECORDING_DELAY_SECONDS", "60"))
 GHL_BASE = "https://services.leadconnectorhq.com"
 
 # GHL message type IDs that represent calls
-CALL_TYPE_IDS = {"10", "TYPE_CALL"}
+# GHL type '1' = outbound/inbound call message
+CALL_TYPE_IDS = {"1", "10", "TYPE_CALL"}
 
 
 def ghl_headers(version: str = "2021-04-15") -> dict:
@@ -216,8 +217,12 @@ async def get_recording_url(contact_id: str) -> str | None:
 
                 if is_call:
                     meta = msg.get("meta") or {}
+                    call_meta = meta.get("call") or {}
                     url = (
-                        meta.get("url")
+                        call_meta.get("url")
+                        or call_meta.get("recordingUrl")
+                        or call_meta.get("recording_url")
+                        or meta.get("url")
                         or meta.get("recordingUrl")
                         or meta.get("recording_url")
                         or msg.get("url")
@@ -227,7 +232,8 @@ async def get_recording_url(contact_id: str) -> str | None:
                         print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
                         return url
                     else:
-                        print(f"[{contact_id}]   Call message found but NO recording URL. Full msg: {msg}")
+                        call_duration = call_meta.get("duration", 0)
+                        print(f"[{contact_id}]   Call found (duration={call_duration}s) but no recording URL")
 
     print(f"[{contact_id}] No call recording found in any conversation")
     return None
