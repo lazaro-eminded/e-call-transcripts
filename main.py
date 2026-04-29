@@ -182,12 +182,16 @@ async def process_call(contact_id: str, recording_url: str | bytes | None = None
         print(f"[{contact_id}] No recording found after all retries — aborting")
         return
 
-    if isinstance(recording_url, bytes):
-        print(f"[{contact_id}] Transcribing audio bytes ({len(recording_url)} bytes)")
-        transcript = await transcribe_bytes(recording_url)
-    else:
-        print(f"[{contact_id}] Transcribing URL: {recording_url}")
-        transcript = await transcribe(recording_url)
+    try:
+        if isinstance(recording_url, bytes):
+            print(f"[{contact_id}] Transcribing audio bytes ({len(recording_url)} bytes)")
+            transcript = await transcribe_bytes(recording_url)
+        else:
+            print(f"[{contact_id}] Transcribing URL: {recording_url}")
+            transcript = await transcribe(recording_url)
+    except Exception as e:
+        print(f"[{contact_id}] Transcription exception: {type(e).__name__}: {e}")
+        return
     if not transcript:
         print(f"[{contact_id}] Empty transcription — aborting")
         return
