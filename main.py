@@ -299,7 +299,29 @@ async def get_recording_url(contact_id: str) -> str | None:
                     call_duration = call_meta.get("duration", 0)
                     print(f"[{contact_id}]   Call (duration={call_duration}s, altId={alt_id!r}) — no recording URL")
 
-    print(f"[{contact_id}] No call recording found in any conversation")
+    print(f"[{contact_id}] No call recording found in any conversation — trying calls API...")
+    return await fetch_recording_via_calls_api(contact_id)
+
+
+async def fetch_recording_via_calls_api(contact_id: str) -> str | None:
+    """Try GHL's calls/reporting API which may expose recording URLs."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        for endpoint, params in [
+            (f"{GHL_BASE}/calls", {"locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 5}),
+            (f"{GHL_BASE}/reporting/calls", {"locationId": GHL_LOCATION_ID, "contactId": contact_id}),
+            (f"{GHL_BASE}/phone-call", {"locationId": GHL_LOCATION_ID, "contactId": contact_id}),
+        ]:
+            try:
+                r = await client.get(endpoint, headers=ghl_headers(), params=params)
+                print(f"[{contact_id}] Calls API {endpoint} → {r.status_code}: {r.text[:300]}")
+                if r.status_code == 200:
+                    data = r.json()
+                    # Try to find a recording URL anywhere in the response
+                    text = r.text
+                    if "recordingUrl" in text or "recording_url" in text or "recordingurl" in text.lower():
+                        print(f"[{contact_id}] Possible recording URL in response — full: {text[:500]}")
+            except Exception as e:
+                print(f"[{contact_id}] Calls API {endpoint} error: {e}")
     return None
 
 
