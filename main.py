@@ -84,6 +84,33 @@ async def health():
     return {"status": "ok", "service": "e-call-transcripts"}
 
 
+@app.get("/debug/messages/{contact_id}")
+async def debug_messages(contact_id: str):
+    """Fetches raw GHL messages for a contact — use to inspect call message structure."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        conv_resp = await client.get(
+            f"{GHL_BASE}/conversations/search",
+            headers=ghl_headers(),
+            params={"locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 5},
+        )
+        if conv_resp.status_code != 200:
+            return {"error": conv_resp.status_code, "body": conv_resp.text}
+
+        conversations = conv_resp.json().get("conversations", [])
+        result = []
+        for conv in conversations:
+            conv_id = conv.get("id")
+            msg_resp = await client.get(
+                f"{GHL_BASE}/conversations/{conv_id}/messages",
+                headers=ghl_headers(),
+                params={"limit": 20},
+            )
+            messages = msg_resp.json() if msg_resp.status_code == 200 else {"error": msg_resp.text}
+            result.append({"conversationId": conv_id, "raw": messages})
+
+    return result
+
+
 @app.post("/webhook/debug")
 async def debug_webhook(request: Request):
     """Dump the full payload to logs — use this to inspect what GHL sends."""
