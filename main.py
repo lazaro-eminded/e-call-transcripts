@@ -14,7 +14,7 @@ GHL_API_KEY = os.getenv("GHL_API_KEY", "")
 GHL_LOCATION_ID = os.getenv("GHL_LOCATION_ID", "")
 GHL_USER_ID = os.getenv("GHL_USER_ID", "")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
-MIN_CALL_DURATION = int(os.getenv("MIN_CALL_DURATION_SECONDS", "60"))
+MIN_CALL_DURATION = int(os.getenv("MIN_CALL_DURATION_SECONDS", "5"))
 RECORDING_DELAY = int(os.getenv("RECORDING_DELAY_SECONDS", "60"))
 
 GHL_BASE = "https://services.leadconnectorhq.com"
