@@ -9,6 +9,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 load_dotenv()
 
 app = FastAPI(title="e-call-transcripts")
+print("=== e-call-transcripts v4 started ===")
 
 GHL_API_KEY = os.getenv("GHL_API_KEY", "")
 GHL_LOCATION_ID = os.getenv("GHL_LOCATION_ID", "")
@@ -182,6 +183,7 @@ async def process_call(contact_id: str, recording_url: str | bytes | None = None
         print(f"[{contact_id}] No recording found after all retries — aborting")
         return
 
+    print(f"[{contact_id}] recording_url type={type(recording_url).__name__}")
     try:
         if isinstance(recording_url, bytes):
             print(f"[{contact_id}] Transcribing audio bytes ({len(recording_url)} bytes)")
