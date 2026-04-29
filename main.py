@@ -341,7 +341,7 @@ async def transcribe(audio_url: str) -> str | None:
         smart_format=True,
         diarize=True,
         punctuate=True,
-        language="es",
+        language="es-419",
     )
 
     response = deepgram.listen.rest.v("1").transcribe_url({"url": audio_url}, options)
@@ -371,7 +371,7 @@ async def transcribe_bytes(audio_bytes: bytes) -> str | None:
         smart_format=True,
         diarize=True,
         punctuate=True,
-        language="es",
+        language="es-419",
     )
     response = deepgram.listen.rest.v("1").transcribe_file(
         {"buffer": audio_bytes, "mimetype": "audio/x-wav"},
