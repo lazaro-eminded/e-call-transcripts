@@ -267,7 +267,7 @@ async def get_recording_url(contact_id: str) -> str | bytes | None:
                     if single_resp.status_code == 200:
                         msg = single_resp.json()
 
-                print(f"[{contact_id}]   CALL msg completo: {msg}")
+                print(f"[{contact_id}]   CALL msg id={msg.get('id')} type={msg.get('type')} meta={msg.get('meta')} attachments={msg.get('attachments')}")
 
                 meta = msg.get("meta") or {}
                 call_meta = meta.get("call") or {}
@@ -295,7 +295,8 @@ async def get_recording_url(contact_id: str) -> str | bytes | None:
                     url = await fetch_recording_by_message_id(client, contact_id, msg_id)
 
                 if url:
-                    print(f"[{contact_id}] Found recording in conv {conv_id}: {url}")
+                    size_info = f"{len(url)} bytes (WAV)" if isinstance(url, bytes) else url
+                    print(f"[{contact_id}] Found recording in conv {conv_id}: {size_info}")
                     return url
                 else:
                     call_duration = call_meta.get("duration", 0)
