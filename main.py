@@ -110,21 +110,25 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
     except (ValueError, TypeError):
         duration = 0.0
 
-    if duration < MIN_CALL_DURATION:
-        return {
-            "status": "skipped",
-            "reason": f"duration {duration}s below minimum {MIN_CALL_DURATION}s",
-        }
-
     contact_id = (
         payload.get("contactId")
         or payload.get("contact_id")
         or payload.get("id")
     )
+    location_id = payload.get("locationId") or payload.get("location_id")
+
+    print(f"[webhook] locationId={location_id} contactId={contact_id} duration={duration}s configured_locations={list(LOCATIONS.keys())}")
+
+    if duration < MIN_CALL_DURATION:
+        print(f"[webhook] skipped — duration {duration}s below minimum {MIN_CALL_DURATION}s")
+        return {
+            "status": "skipped",
+            "reason": f"duration {duration}s below minimum {MIN_CALL_DURATION}s",
+        }
+
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
-    location_id = payload.get("locationId") or payload.get("location_id")
     if not location_id:
         if len(LOCATIONS) == 1:
             loc_cfg = next(iter(LOCATIONS.values()))
