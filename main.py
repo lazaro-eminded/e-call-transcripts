@@ -453,6 +453,7 @@ async def transcribe(audio_url: str) -> str | None:
         model="nova-2",
         smart_format=True,
         diarize=True,
+        utterances=True,
         punctuate=True,
         detect_language=True,
     )
@@ -466,6 +467,7 @@ async def transcribe_bytes(audio_bytes: bytes) -> str | None:
         model="nova-2",
         smart_format=True,
         diarize=True,
+        utterances=True,
         punctuate=True,
         detect_language=True,
     )
