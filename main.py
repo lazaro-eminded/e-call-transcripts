@@ -33,9 +33,10 @@ class LocationConfig:
 def load_locations() -> dict[str, LocationConfig]:
     registry: dict[str, LocationConfig] = {}
 
-    json_path = Path("locations.json")
-    if json_path.exists():
-        data = json.loads(json_path.read_text())
+    # Fuente 1: variable de entorno LOCATIONS_JSON (recomendado para Railway/cloud)
+    locations_json_env = os.getenv("LOCATIONS_JSON", "")
+    if locations_json_env:
+        data = json.loads(locations_json_env)
         for loc_id, cfg in data.items():
             registry[loc_id] = LocationConfig(
                 location_id=loc_id,
@@ -43,7 +44,19 @@ def load_locations() -> dict[str, LocationConfig]:
                 user_id=cfg.get("user_id", ""),
             )
 
-    # Fallback backwards-compat: env vars legacy
+    # Fuente 2: archivo locations.json (útil en desarrollo local)
+    if not registry:
+        json_path = Path("locations.json")
+        if json_path.exists():
+            data = json.loads(json_path.read_text())
+            for loc_id, cfg in data.items():
+                registry[loc_id] = LocationConfig(
+                    location_id=loc_id,
+                    api_key=cfg["api_key"],
+                    user_id=cfg.get("user_id", ""),
+                )
+
+    # Fuente 3: env vars legacy (backwards-compat para una sola location)
     if GHL_API_KEY and GHL_LOCATION_ID:
         legacy = LocationConfig(
             location_id=GHL_LOCATION_ID,
