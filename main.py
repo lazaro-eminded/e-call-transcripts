@@ -415,7 +415,7 @@ def _parse_transcript(results) -> str | None:
     if utterances:
         lines = []
         for utt in utterances:
-            label = "Agente" if utt.speaker == 0 else "Cliente"
+            label = "Setter" if utt.speaker == 0 else "Cliente"
             lines.append(f"{label}: {utt.transcript}")
         return "\n".join(lines)
     channels = getattr(results, "channels", None) or []
