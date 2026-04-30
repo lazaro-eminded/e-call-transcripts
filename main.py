@@ -1,5 +1,8 @@
 import asyncio
+import json
 import os
+from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 from deepgram import DeepgramClient, PrerecordedOptions
@@ -20,9 +23,44 @@ RECORDING_DELAY = int(os.getenv("RECORDING_DELAY_SECONDS", "60"))
 GHL_BASE = "https://services.leadconnectorhq.com"
 
 
-def ghl_headers(version: str = "2021-04-15") -> dict:
+@dataclass
+class LocationConfig:
+    location_id: str
+    api_key: str
+    user_id: str
+
+
+def load_locations() -> dict[str, LocationConfig]:
+    registry: dict[str, LocationConfig] = {}
+
+    json_path = Path("locations.json")
+    if json_path.exists():
+        data = json.loads(json_path.read_text())
+        for loc_id, cfg in data.items():
+            registry[loc_id] = LocationConfig(
+                location_id=loc_id,
+                api_key=cfg["api_key"],
+                user_id=cfg.get("user_id", ""),
+            )
+
+    # Fallback backwards-compat: env vars legacy
+    if GHL_API_KEY and GHL_LOCATION_ID:
+        legacy = LocationConfig(
+            location_id=GHL_LOCATION_ID,
+            api_key=GHL_API_KEY,
+            user_id=GHL_USER_ID,
+        )
+        registry.setdefault(GHL_LOCATION_ID, legacy)
+
+    return registry
+
+
+LOCATIONS: dict[str, LocationConfig] = load_locations()
+
+
+def ghl_headers(api_key: str, version: str = "2021-04-15") -> dict:
     return {
-        "Authorization": f"Bearer {GHL_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Version": version,
     }
@@ -59,39 +97,56 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
-    background_tasks.add_task(process_call, contact_id)
-    return {"status": "accepted", "contactId": contact_id}
+    location_id = payload.get("locationId") or payload.get("location_id")
+    if not location_id:
+        if len(LOCATIONS) == 1:
+            loc_cfg = next(iter(LOCATIONS.values()))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="locationId not found in payload and multiple locations are configured",
+            )
+    else:
+        loc_cfg = LOCATIONS.get(location_id)
+        if loc_cfg is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"locationId '{location_id}' is not configured",
+            )
+
+    background_tasks.add_task(process_call, contact_id, loc_cfg)
+    return {"status": "accepted", "contactId": contact_id, "locationId": loc_cfg.location_id}
 
 
-async def process_call(contact_id: str):
-    print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
+async def process_call(contact_id: str, loc_cfg: LocationConfig):
+    print(f"[{loc_cfg.location_id}][{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
     await asyncio.sleep(RECORDING_DELAY)
 
-    audio_url = await get_recording_url(contact_id)
+    audio_url = await get_recording_url(contact_id, loc_cfg)
     if not audio_url:
-        print(f"[{contact_id}] No recording URL found — aborting")
+        print(f"[{loc_cfg.location_id}][{contact_id}] No recording URL found — aborting")
         return
 
-    print(f"[{contact_id}] Transcribing: {audio_url}")
+    print(f"[{loc_cfg.location_id}][{contact_id}] Transcribing: {audio_url}")
     transcript = await transcribe(audio_url)
     if not transcript:
-        print(f"[{contact_id}] Empty transcription — aborting")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Empty transcription — aborting")
         return
 
-    await post_note(contact_id, transcript)
-    print(f"[{contact_id}] Done")
+    await post_note(contact_id, transcript, loc_cfg)
+    print(f"[{loc_cfg.location_id}][{contact_id}] Done")
 
 
-async def get_recording_url(contact_id: str) -> str | None:
+async def get_recording_url(contact_id: str, loc_cfg: LocationConfig) -> str | None:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{GHL_BASE}/conversations/search",
-            headers=ghl_headers(),
-            params={"locationId": GHL_LOCATION_ID, "contactId": contact_id},
+            headers=ghl_headers(loc_cfg.api_key),
+            params={"locationId": loc_cfg.location_id, "contactId": contact_id},
         )
 
     if resp.status_code != 200:
-        print(f"[{contact_id}] GHL search error {resp.status_code}: {resp.text[:300]}")
+        print(f"[{loc_cfg.location_id}][{contact_id}] GHL search error {resp.status_code}: {resp.text[:300]}")
         return None
 
     data = resp.json()
@@ -149,19 +204,19 @@ async def transcribe(audio_url: str) -> str | None:
     return None
 
 
-async def post_note(contact_id: str, transcript: str):
+async def post_note(contact_id: str, transcript: str, loc_cfg: LocationConfig):
     body: dict = {"body": f"📞 Transcripción de llamada:\n\n{transcript}"}
-    if GHL_USER_ID:
-        body["userId"] = GHL_USER_ID
+    if loc_cfg.user_id:
+        body["userId"] = loc_cfg.user_id
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{GHL_BASE}/contacts/{contact_id}/notes",
-            headers=ghl_headers(version="2021-07-28"),
+            headers=ghl_headers(loc_cfg.api_key, version="2021-07-28"),
             json=body,
         )
 
     if resp.status_code not in (200, 201):
-        print(f"[{contact_id}] Note error {resp.status_code}: {resp.text[:300]}")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Note error {resp.status_code}: {resp.text[:300]}")
     else:
-        print(f"[{contact_id}] Note posted successfully")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Note posted successfully")

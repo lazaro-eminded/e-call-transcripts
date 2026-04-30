@@ -1,0 +1,10 @@
+{
+  "LOCATION_ID_SUBCUENTA_1": {
+    "api_key": "pit-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "user_id": ""
+  },
+  "LOCATION_ID_SUBCUENTA_2": {
+    "api_key": "pit-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+    "user_id": "OPTIONAL_GHL_USER_ID"
+  }
+}
