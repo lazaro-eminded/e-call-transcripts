@@ -137,7 +137,7 @@ async def call_completed_by_location(location_id: str, request: Request, backgro
 @app.post("/webhook/call-completed")
 async def call_completed(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
-    location_id = payload.get("locationId") or payload.get("location_id")
+    location_id = payload.get("locationId") or payload.get("location_id") or payload.get("Location_id")
     if not location_id:
         if len(LOCATIONS) == 1:
             loc_cfg = next(iter(LOCATIONS.values()))
