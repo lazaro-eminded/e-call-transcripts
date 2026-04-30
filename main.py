@@ -411,16 +411,39 @@ async def _fetch_recording_bytes(
 
 
 def _parse_transcript(results) -> str | None:
+    # Intento 1: utterances con diarización
     utterances = getattr(results, "utterances", None) or []
     if utterances:
         lines = []
         for utt in utterances:
-            label = "Setter" if utt.speaker == 0 else "Cliente"
+            label = "A" if utt.speaker == 0 else "B"
             lines.append(f"{label}: {utt.transcript}")
         return "\n".join(lines)
+
+    # Intento 2: palabras con speaker info (diarización a nivel palabra)
     channels = getattr(results, "channels", None) or []
     if channels:
+        words = getattr(channels[0].alternatives[0], "words", None) or []
+        if words and hasattr(words[0], "speaker") and words[0].speaker is not None:
+            lines = []
+            current_label = None
+            current_words = []
+            for word in words:
+                label = "A" if getattr(word, "speaker", 0) == 0 else "B"
+                if label != current_label:
+                    if current_words:
+                        lines.append(f"{current_label}: {' '.join(current_words)}")
+                    current_label = label
+                    current_words = [word.word]
+                else:
+                    current_words.append(word.word)
+            if current_words:
+                lines.append(f"{current_label}: {' '.join(current_words)}")
+            return "\n".join(lines)
+
+        # Último recurso: texto plano
         return channels[0].alternatives[0].transcript
+
     return None
 
 
