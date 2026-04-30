@@ -98,13 +98,9 @@ async def health():
     return {"status": "ok", "service": "e-call-transcripts"}
 
 
-@app.post("/webhook/call-completed")
-async def call_completed(request: Request, background_tasks: BackgroundTasks):
-    payload = await request.json()
-
+def _handle_call_webhook(payload: dict, loc_cfg: LocationConfig, background_tasks: BackgroundTasks):
     custom_data = payload.get("customData", {})
     duration_raw = custom_data.get("Call Duration", "0")
-
     try:
         duration = float(duration_raw)
     except (ValueError, TypeError):
@@ -115,38 +111,43 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
         or payload.get("contact_id")
         or payload.get("id")
     )
-    location_id = payload.get("locationId") or payload.get("location_id")
 
-    print(f"[webhook] locationId={location_id} contactId={contact_id} duration={duration}s configured_locations={list(LOCATIONS.keys())}")
+    print(f"[{loc_cfg.location_id}] contactId={contact_id} duration={duration}s")
 
     if duration < MIN_CALL_DURATION:
-        print(f"[webhook] skipped — duration {duration}s below minimum {MIN_CALL_DURATION}s")
-        return {
-            "status": "skipped",
-            "reason": f"duration {duration}s below minimum {MIN_CALL_DURATION}s",
-        }
+        print(f"[{loc_cfg.location_id}] skipped — duration {duration}s below minimum {MIN_CALL_DURATION}s")
+        return {"status": "skipped", "reason": f"duration {duration}s below minimum {MIN_CALL_DURATION}s"}
 
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
+    background_tasks.add_task(process_call, contact_id, loc_cfg)
+    return {"status": "accepted", "contactId": contact_id, "locationId": loc_cfg.location_id}
+
+
+@app.post("/webhook/call-completed/{location_id}")
+async def call_completed_by_location(location_id: str, request: Request, background_tasks: BackgroundTasks):
+    loc_cfg = LOCATIONS.get(location_id)
+    if loc_cfg is None:
+        raise HTTPException(status_code=404, detail=f"locationId '{location_id}' is not configured")
+    payload = await request.json()
+    return _handle_call_webhook(payload, loc_cfg, background_tasks)
+
+
+@app.post("/webhook/call-completed")
+async def call_completed(request: Request, background_tasks: BackgroundTasks):
+    payload = await request.json()
+    location_id = payload.get("locationId") or payload.get("location_id")
     if not location_id:
         if len(LOCATIONS) == 1:
             loc_cfg = next(iter(LOCATIONS.values()))
         else:
-            raise HTTPException(
-                status_code=400,
-                detail="locationId not found in payload and multiple locations are configured",
-            )
+            raise HTTPException(status_code=400, detail="locationId not found in payload — use /webhook/call-completed/{locationId}")
     else:
         loc_cfg = LOCATIONS.get(location_id)
         if loc_cfg is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"locationId '{location_id}' is not configured",
-            )
-
-    background_tasks.add_task(process_call, contact_id, loc_cfg)
-    return {"status": "accepted", "contactId": contact_id, "locationId": loc_cfg.location_id}
+            raise HTTPException(status_code=400, detail=f"locationId '{location_id}' is not configured")
+    return _handle_call_webhook(payload, loc_cfg, background_tasks)
 
 
 async def process_call(contact_id: str, loc_cfg: LocationConfig):
