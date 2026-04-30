@@ -134,10 +134,17 @@ async def call_completed_by_location(location_id: str, request: Request, backgro
     return _handle_call_webhook(payload, loc_cfg, background_tasks)
 
 
+def _extract_location_id(payload: dict) -> str | None:
+    for key, val in payload.items():
+        if key.lower().replace("_", "") == "locationid" and val:
+            return val
+    return None
+
+
 @app.post("/webhook/call-completed")
 async def call_completed(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
-    location_id = payload.get("locationId") or payload.get("location_id") or payload.get("Location_id")
+    location_id = _extract_location_id(payload)
     if not location_id:
         if len(LOCATIONS) == 1:
             loc_cfg = next(iter(LOCATIONS.values()))
