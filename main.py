@@ -33,7 +33,21 @@ class LocationConfig:
 def load_locations() -> dict[str, LocationConfig]:
     registry: dict[str, LocationConfig] = {}
 
-    # Fuente 1: variable de entorno LOCATIONS_JSON (recomendado para Railway/cloud)
+    # Fuente 1: pares LOCATION_ID_<SUFFIX> + GHL_API_KEY_<SUFFIX> en env vars
+    # Ej: LOCATION_ID_EMINDED + GHL_API_KEY_EMINDED
+    for key, loc_id in os.environ.items():
+        if not key.startswith("LOCATION_ID_"):
+            continue
+        suffix = key[len("LOCATION_ID_"):]
+        api_key = os.getenv(f"GHL_API_KEY_{suffix}", "")
+        if loc_id and api_key:
+            registry[loc_id] = LocationConfig(
+                location_id=loc_id,
+                api_key=api_key,
+                user_id=GHL_USER_ID,
+            )
+
+    # Fuente 2: variable de entorno LOCATIONS_JSON (JSON completo como string)
     locations_json_env = os.getenv("LOCATIONS_JSON", "")
     if locations_json_env:
         data = json.loads(locations_json_env)
@@ -41,29 +55,29 @@ def load_locations() -> dict[str, LocationConfig]:
             registry[loc_id] = LocationConfig(
                 location_id=loc_id,
                 api_key=cfg["api_key"],
-                user_id=cfg.get("user_id", ""),
+                user_id=cfg.get("user_id", GHL_USER_ID),
             )
 
-    # Fuente 2: archivo locations.json (útil en desarrollo local)
-    if not registry:
-        json_path = Path("locations.json")
-        if json_path.exists():
-            data = json.loads(json_path.read_text())
-            for loc_id, cfg in data.items():
-                registry[loc_id] = LocationConfig(
+    # Fuente 3: archivo locations.json (desarrollo local)
+    json_path = Path("locations.json")
+    if json_path.exists():
+        data = json.loads(json_path.read_text())
+        for loc_id, cfg in data.items():
+            registry.setdefault(
+                loc_id,
+                LocationConfig(
                     location_id=loc_id,
                     api_key=cfg["api_key"],
-                    user_id=cfg.get("user_id", ""),
-                )
+                    user_id=cfg.get("user_id", GHL_USER_ID),
+                ),
+            )
 
-    # Fuente 3: env vars legacy (backwards-compat para una sola location)
+    # Fuente 4: env vars legacy GHL_API_KEY + GHL_LOCATION_ID (una sola location)
     if GHL_API_KEY and GHL_LOCATION_ID:
-        legacy = LocationConfig(
-            location_id=GHL_LOCATION_ID,
-            api_key=GHL_API_KEY,
-            user_id=GHL_USER_ID,
+        registry.setdefault(
+            GHL_LOCATION_ID,
+            LocationConfig(location_id=GHL_LOCATION_ID, api_key=GHL_API_KEY, user_id=GHL_USER_ID),
         )
-        registry.setdefault(GHL_LOCATION_ID, legacy)
 
     return registry
 
