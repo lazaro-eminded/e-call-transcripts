@@ -1,5 +1,8 @@
 import asyncio
+import json
 import os
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 from deepgram import DeepgramClient, PrerecordedOptions
@@ -9,31 +12,95 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 load_dotenv()
 
 app = FastAPI(title="e-call-transcripts")
-print("=== e-call-transcripts v4 started ===")
 
 GHL_API_KEY = os.getenv("GHL_API_KEY", "")
 GHL_LOCATION_ID = os.getenv("GHL_LOCATION_ID", "")
 GHL_USER_ID = os.getenv("GHL_USER_ID", "")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
-MIN_CALL_DURATION = int(os.getenv("MIN_CALL_DURATION_SECONDS", "5"))
+MIN_CALL_DURATION = int(os.getenv("MIN_CALL_DURATION_SECONDS", "0"))
 RECORDING_DELAY = int(os.getenv("RECORDING_DELAY_SECONDS", "60"))
 
 GHL_BASE = "https://services.leadconnectorhq.com"
 
-# GHL message type IDs that represent calls
-# GHL type '1' = outbound/inbound call message
 CALL_TYPE_IDS = {"1", "10", "TYPE_CALL"}
+_AUDIO_EXTENSIONS = (".mp3", ".mp4", ".wav", ".ogg", ".m4a", ".webm", ".aac")
 
 
-def ghl_headers(version: str = "2021-04-15") -> dict:
+@dataclass
+class LocationConfig:
+    location_id: str
+    api_key: str
+    user_id: str
+    name: str = field(default="")
+
+
+def load_locations() -> dict[str, LocationConfig]:
+    registry: dict[str, LocationConfig] = {}
+
+    # Pares LOCATION_ID_<SUFFIX> + GHL_API_KEY_<SUFFIX>
+    for key, loc_id in os.environ.items():
+        if not key.startswith("LOCATION_ID_"):
+            continue
+        suffix = key[len("LOCATION_ID_"):]
+        api_key = os.getenv(f"GHL_API_KEY_{suffix}", "")
+        if loc_id and api_key:
+            registry[loc_id] = LocationConfig(
+                location_id=loc_id,
+                api_key=api_key,
+                user_id=GHL_USER_ID,
+            )
+
+    # LOCATIONS_JSON como string JSON
+    locations_json_env = os.getenv("LOCATIONS_JSON", "")
+    if locations_json_env:
+        data = json.loads(locations_json_env)
+        for loc_id, cfg in data.items():
+            registry[loc_id] = LocationConfig(
+                location_id=loc_id,
+                api_key=cfg["api_key"],
+                user_id=cfg.get("user_id", GHL_USER_ID),
+            )
+
+    # Archivo locations.json (desarrollo local)
+    json_path = Path("locations.json")
+    if json_path.exists():
+        data = json.loads(json_path.read_text())
+        for loc_id, cfg in data.items():
+            registry.setdefault(
+                loc_id,
+                LocationConfig(
+                    location_id=loc_id,
+                    api_key=cfg["api_key"],
+                    user_id=cfg.get("user_id", GHL_USER_ID),
+                ),
+            )
+
+    # Fallback: env vars legacy (una sola location)
+    if GHL_API_KEY and GHL_LOCATION_ID:
+        registry.setdefault(
+            GHL_LOCATION_ID,
+            LocationConfig(location_id=GHL_LOCATION_ID, api_key=GHL_API_KEY, user_id=GHL_USER_ID),
+        )
+
+    return registry
+
+
+LOCATIONS: dict[str, LocationConfig] = load_locations()
+
+
+def ghl_headers(api_key: str, version: str = "2021-04-15") -> dict:
     return {
-        "Authorization": f"Bearer {GHL_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Version": version,
     }
 
 
-_AUDIO_EXTENSIONS = (".mp3", ".mp4", ".wav", ".ogg", ".m4a", ".webm", ".aac")
+def _extract_location_id(payload: dict) -> str | None:
+    for key, val in payload.items():
+        if key.lower().replace("_", "") == "locationid" and val:
+            return val
+    return None
 
 
 def _looks_like_audio_url(value: object) -> bool:
@@ -51,7 +118,6 @@ def _looks_like_audio_url(value: object) -> bool:
 
 
 def _find_recording_url(payload: dict, custom_data: dict) -> str | None:
-    # Explicit well-known keys first
     candidates = [
         payload.get("recordingUrl"),
         payload.get("recording_url"),
@@ -69,8 +135,6 @@ def _find_recording_url(payload: dict, custom_data: dict) -> str | None:
         if _looks_like_audio_url(v):
             return v
 
-    # Fallback: scan all top-level and customData values for anything that
-    # looks like an audio URL
     for source in (payload, custom_data):
         for k, v in source.items():
             if _looks_like_audio_url(v):
@@ -80,19 +144,48 @@ def _find_recording_url(payload: dict, custom_data: dict) -> str | None:
     return None
 
 
+async def get_location_info(loc_cfg: LocationConfig) -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{GHL_BASE}/locations/{loc_cfg.location_id}",
+            headers=ghl_headers(loc_cfg.api_key, version="2023-02-21"),
+        )
+    if resp.status_code == 200:
+        data = resp.json()
+        return data.get("location", data)
+    return {"error": resp.status_code, "detail": resp.text[:200]}
+
+
+@app.on_event("startup")
+async def startup():
+    print(f"=== e-call-transcripts started — {len(LOCATIONS)} location(s) configured ===")
+    for loc_cfg in LOCATIONS.values():
+        info = await get_location_info(loc_cfg)
+        name = info.get("name", "unknown")
+        loc_cfg.name = name
+        print(f"  ✓ {loc_cfg.location_id} → {name}")
+
+
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "e-call-transcripts"}
+    return {
+        "status": "ok",
+        "service": "e-call-transcripts",
+        "locations": [{"id": c.location_id, "name": c.name} for c in LOCATIONS.values()],
+    }
 
 
 @app.get("/debug/messages/{contact_id}")
-async def debug_messages(contact_id: str):
-    """Fetches raw GHL messages for a contact — use to inspect call message structure."""
+async def debug_messages(contact_id: str, location_id: str | None = None):
+    loc_cfg = _resolve_location(location_id)
+    if not loc_cfg:
+        return {"error": "location not found"}
+
     async with httpx.AsyncClient(timeout=30) as client:
         conv_resp = await client.get(
             f"{GHL_BASE}/conversations/search",
-            headers=ghl_headers(),
-            params={"locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 5},
+            headers=ghl_headers(loc_cfg.api_key),
+            params={"locationId": loc_cfg.location_id, "contactId": contact_id, "limit": 5},
         )
         if conv_resp.status_code != 200:
             return {"error": conv_resp.status_code, "body": conv_resp.text}
@@ -103,7 +196,7 @@ async def debug_messages(contact_id: str):
             conv_id = conv.get("id")
             msg_resp = await client.get(
                 f"{GHL_BASE}/conversations/{conv_id}/messages",
-                headers=ghl_headers(),
+                headers=ghl_headers(loc_cfg.api_key),
                 params={"limit": 20},
             )
             messages = msg_resp.json() if msg_resp.status_code == 200 else {"error": msg_resp.text}
@@ -114,7 +207,6 @@ async def debug_messages(contact_id: str):
 
 @app.api_route("/webhook/debug", methods=["GET", "POST"])
 async def debug_webhook(request: Request):
-    """Dump the full payload to logs — use this to inspect what GHL sends."""
     if request.method == "GET":
         return {"status": "debug endpoint active — send POST to inspect payload"}
     payload = await request.json()
@@ -125,111 +217,121 @@ async def debug_webhook(request: Request):
     return {"received_keys": list(payload.keys()), "payload": payload}
 
 
-@app.post("/webhook/call-completed")
-async def call_completed(request: Request, background_tasks: BackgroundTasks):
-    payload = await request.json()
-    print(f"[webhook] Received payload keys: {list(payload.keys())}")
+def _resolve_location(location_id: str | None) -> LocationConfig | None:
+    if location_id:
+        return LOCATIONS.get(location_id)
+    if len(LOCATIONS) == 1:
+        return next(iter(LOCATIONS.values()))
+    return None
 
+
+def _handle_webhook(payload: dict, loc_cfg: LocationConfig, background_tasks: BackgroundTasks):
     custom_data = payload.get("customData", {})
     duration_raw = custom_data.get("Call Duration", "0")
-
     try:
         duration = float(duration_raw)
     except (ValueError, TypeError):
         duration = 0.0
-
-    if duration < MIN_CALL_DURATION:
-        return {
-            "status": "skipped",
-            "reason": f"duration {duration}s below minimum {MIN_CALL_DURATION}s",
-        }
 
     contact_id = (
         payload.get("contactId")
         or payload.get("contact_id")
         or payload.get("id")
     )
+
+    print(f"[{loc_cfg.location_id}] contactId={contact_id} duration={duration}s")
+
+    if MIN_CALL_DURATION > 0 and duration < MIN_CALL_DURATION:
+        print(f"[{loc_cfg.location_id}] skipped — duration {duration}s < minimum {MIN_CALL_DURATION}s")
+        return {"status": "skipped", "reason": f"duration {duration}s below minimum {MIN_CALL_DURATION}s"}
+
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
-    # Use recording URL from payload if GHL/Call Tools includes it directly.
-    # We search both the top-level payload and customData for any key that
-    # looks like a URL pointing to an audio file.
     recording_url = _find_recording_url(payload, custom_data)
-    print(f"[{contact_id}] Recording URL from payload: {recording_url!r}")
+    print(f"[{loc_cfg.location_id}][{contact_id}] Recording URL from payload: {recording_url!r}")
 
-    background_tasks.add_task(process_call, contact_id, recording_url)
-    return {"status": "accepted", "contactId": contact_id}
+    background_tasks.add_task(process_call, contact_id, loc_cfg, recording_url)
+    return {"status": "accepted", "contactId": contact_id, "locationId": loc_cfg.location_id}
 
 
-async def process_call(contact_id: str, recording_url: str | bytes | None = None):
+@app.post("/webhook/call-completed/{location_id}")
+async def call_completed_by_location(location_id: str, request: Request, background_tasks: BackgroundTasks):
+    loc_cfg = LOCATIONS.get(location_id)
+    if loc_cfg is None:
+        raise HTTPException(status_code=404, detail=f"locationId '{location_id}' not configured")
+    payload = await request.json()
+    return _handle_webhook(payload, loc_cfg, background_tasks)
+
+
+@app.post("/webhook/call-completed")
+async def call_completed(request: Request, background_tasks: BackgroundTasks):
+    payload = await request.json()
+    location_id = _extract_location_id(payload)
+    loc_cfg = _resolve_location(location_id)
+
+    if loc_cfg is None:
+        print(f"[webhook] WARNING: locationId={location_id!r} not found — payload keys: {list(payload.keys())}")
+        return {"status": "skipped", "reason": "locationId not found or not configured"}
+
+    return _handle_webhook(payload, loc_cfg, background_tasks)
+
+
+async def process_call(contact_id: str, loc_cfg: LocationConfig, recording_url: str | bytes | None = None):
     if recording_url:
-        print(f"[{contact_id}] Recording from webhook payload")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Recording from webhook payload")
     else:
-        delays = [
-            int(os.getenv("RECORDING_DELAY_SECONDS", "60")),
-            120,
-            120,
-        ]
+        delays = [RECORDING_DELAY, 120, 120]
         for attempt, wait in enumerate(delays, start=1):
-            print(f"[{contact_id}] Attempt {attempt}: waiting {wait}s for GHL to process recording...")
+            print(f"[{loc_cfg.location_id}][{contact_id}] Attempt {attempt}: waiting {wait}s...")
             await asyncio.sleep(wait)
-            recording_url = await get_recording_url(contact_id)
+            recording_url = await get_recording_url(contact_id, loc_cfg)
             if recording_url:
                 break
-            print(f"[{contact_id}] Attempt {attempt}: no recording found yet")
+            print(f"[{loc_cfg.location_id}][{contact_id}] Attempt {attempt}: no recording found yet")
 
     if not recording_url:
-        print(f"[{contact_id}] No recording found after all retries — aborting")
+        print(f"[{loc_cfg.location_id}][{contact_id}] No recording found after all retries — aborting")
         return
 
-    print(f"[{contact_id}] recording_url type={type(recording_url).__name__}")
     try:
         if isinstance(recording_url, bytes):
-            print(f"[{contact_id}] Transcribing audio bytes ({len(recording_url)} bytes)")
+            print(f"[{loc_cfg.location_id}][{contact_id}] Transcribing audio bytes ({len(recording_url)} bytes)")
             transcript = await transcribe_bytes(recording_url)
         else:
-            print(f"[{contact_id}] Transcribing URL: {recording_url}")
+            print(f"[{loc_cfg.location_id}][{contact_id}] Transcribing URL: {recording_url}")
             transcript = await transcribe(recording_url)
     except Exception as e:
-        print(f"[{contact_id}] Transcription exception: {type(e).__name__}: {e}")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Transcription error: {type(e).__name__}: {e}")
         return
+
     if not transcript:
-        print(f"[{contact_id}] Empty transcription — aborting")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Empty transcription — aborting")
         return
 
-    await post_note(contact_id, transcript)
-    print(f"[{contact_id}] Done")
+    await post_note(contact_id, transcript, loc_cfg)
+    print(f"[{loc_cfg.location_id}][{contact_id}] Done")
 
 
-async def get_recording_url(contact_id: str) -> str | bytes | None:
-    """
-    Finds the most recent call recording URL for a contact by:
-    1. Searching conversations for the contact
-    2. Fetching messages for each conversation via /conversations/{id}/messages
-    3. Returning the URL from the most recent call message that has a recording
-    """
+async def get_recording_url(contact_id: str, loc_cfg: LocationConfig) -> str | bytes | None:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{GHL_BASE}/conversations/search",
-            headers=ghl_headers(),
-            params={"locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 10},
+            headers=ghl_headers(loc_cfg.api_key),
+            params={"locationId": loc_cfg.location_id, "contactId": contact_id, "limit": 10},
         )
 
         if resp.status_code != 200:
-            print(f"[{contact_id}] GHL conversations search error {resp.status_code}: {resp.text[:300]}")
+            print(f"[{loc_cfg.location_id}][{contact_id}] Conversations error {resp.status_code}: {resp.text[:300]}")
             return None
 
-        data = resp.json()
-        conversations = data.get("conversations", [])
-
+        conversations = resp.json().get("conversations", [])
         if not conversations:
-            print(f"[{contact_id}] No conversations found for contact")
+            print(f"[{loc_cfg.location_id}][{contact_id}] No conversations found")
             return None
 
-        print(f"[{contact_id}] Found {len(conversations)} conversation(s)")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Found {len(conversations)} conversation(s)")
 
-        # Iterate conversations (already sorted by lastMessage desc in GHL)
         for conv in conversations:
             conv_id = conv.get("id")
             if not conv_id:
@@ -237,58 +339,42 @@ async def get_recording_url(contact_id: str) -> str | bytes | None:
 
             msg_resp = await client.get(
                 f"{GHL_BASE}/conversations/{conv_id}/messages",
-                headers=ghl_headers(),
+                headers=ghl_headers(loc_cfg.api_key),
                 params={"limit": 50},
             )
-
             if msg_resp.status_code != 200:
-                print(f"[{contact_id}] Messages fetch error for conv {conv_id}: {msg_resp.status_code}: {msg_resp.text[:200]}")
                 continue
 
-            msg_data = msg_resp.json()
-            # GHL wraps messages in a nested object: { messages: { messages: [...] } }
-            messages = msg_data.get("messages", [])
+            messages = msg_resp.json().get("messages", [])
             if isinstance(messages, dict):
                 messages = messages.get("messages", [])
 
-            print(f"[{contact_id}] Conv {conv_id}: {len(messages)} message(s)")
-
-            # Sort by dateAdded descending so we pick the most recent call
             messages = sorted(messages, key=lambda m: m.get("dateAdded", ""), reverse=True)
 
             for msg in messages:
                 raw_type = str(msg.get("type") or msg.get("messageType") or "").upper()
-                is_call = "CALL" in raw_type or raw_type in CALL_TYPE_IDS
-
-                if not is_call:
+                if "CALL" not in raw_type and raw_type not in CALL_TYPE_IDS:
                     continue
 
                 msg_id = msg.get("id")
-                # Fetch the individual message — the list endpoint may omit fields
                 if msg_id:
-                    single_resp = await client.get(
+                    single = await client.get(
                         f"{GHL_BASE}/conversations/{conv_id}/messages/{msg_id}",
-                        headers=ghl_headers(),
+                        headers=ghl_headers(loc_cfg.api_key),
                     )
-                    if single_resp.status_code == 200:
-                        msg = single_resp.json()
-
-                print(f"[{contact_id}]   CALL msg id={msg.get('id')} type={msg.get('type')} meta={msg.get('meta')} attachments={msg.get('attachments')}")
+                    if single.status_code == 200:
+                        msg = single.json()
 
                 meta = msg.get("meta") or {}
                 call_meta = meta.get("call") or {}
                 attachments = msg.get("attachments") or []
                 body = msg.get("body") or ""
-                alt_id = msg.get("altId") or ""  # Twilio Call SID (CA...)
-                conv_id_msg = msg.get("conversationId") or conv_id
 
                 url = (
                     call_meta.get("url")
                     or call_meta.get("recordingUrl")
-                    or call_meta.get("recording_url")
                     or meta.get("url")
                     or meta.get("recordingUrl")
-                    or meta.get("recording_url")
                     or msg.get("url")
                     or msg.get("recordingUrl")
                     or (attachments[0].get("url") if attachments and isinstance(attachments[0], dict) else None)
@@ -296,41 +382,45 @@ async def get_recording_url(contact_id: str) -> str | bytes | None:
                     or (body if body.startswith("http") else None)
                 )
 
-                # Use the official GHL recording endpoint
                 if not url and msg_id:
-                    url = await fetch_recording_by_message_id(client, contact_id, msg_id)
+                    url = await _fetch_recording_bytes(client, contact_id, msg_id, loc_cfg)
 
                 if url:
-                    size_info = f"{len(url)} bytes (WAV)" if isinstance(url, bytes) else url
-                    print(f"[{contact_id}] Found recording in conv {conv_id}: {size_info}")
+                    print(f"[{loc_cfg.location_id}][{contact_id}] Recording found in conv {conv_id}")
                     return url
-                else:
-                    call_duration = call_meta.get("duration", 0)
-                    print(f"[{contact_id}]   Call (duration={call_duration}s, altId={alt_id!r}) — no recording URL")
 
-    print(f"[{contact_id}] No call recording found in any conversation")
+    print(f"[{loc_cfg.location_id}][{contact_id}] No recording found in any conversation")
     return None
 
 
-async def fetch_recording_by_message_id(
+async def _fetch_recording_bytes(
     client: httpx.AsyncClient,
     contact_id: str,
     msg_id: str,
+    loc_cfg: LocationConfig,
 ) -> bytes | None:
-    """
-    Official GHL endpoint: returns WAV audio bytes directly.
-    GET /conversations/messages/{messageId}/locations/{locationId}/recording
-    Version: 2023-02-21
-    """
-    endpoint = f"{GHL_BASE}/conversations/messages/{msg_id}/locations/{GHL_LOCATION_ID}/recording"
+    endpoint = f"{GHL_BASE}/conversations/messages/{msg_id}/locations/{loc_cfg.location_id}/recording"
     try:
-        r = await client.get(endpoint, headers=ghl_headers(version="2023-02-21"))
-        content_type = r.headers.get("content-type", "")
-        print(f"[{contact_id}]   Recording endpoint → {r.status_code} content-type={content_type} size={len(r.content)}")
+        r = await client.get(endpoint, headers=ghl_headers(loc_cfg.api_key, version="2023-02-21"))
+        print(f"[{loc_cfg.location_id}][{contact_id}] Recording endpoint → {r.status_code} size={len(r.content)}")
         if r.status_code == 200 and len(r.content) > 1000:
             return r.content
     except Exception as e:
-        print(f"[{contact_id}]   Recording endpoint error: {e}")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Recording endpoint error: {e}")
+    return None
+
+
+def _parse_transcript(results) -> str | None:
+    utterances = getattr(results, "utterances", None) or []
+    if utterances:
+        lines = []
+        for utt in utterances:
+            label = "Agente" if utt.speaker == 0 else "Cliente"
+            lines.append(f"{label}: {utt.transcript}")
+        return "\n".join(lines)
+    channels = getattr(results, "channels", None) or []
+    if channels:
+        return channels[0].alternatives[0].transcript
     return None
 
 
@@ -343,25 +433,8 @@ async def transcribe(audio_url: str) -> str | None:
         punctuate=True,
         detect_language=True,
     )
-
     response = deepgram.listen.rest.v("1").transcribe_url({"url": audio_url}, options)
-    results = response.results
-
-    utterances = getattr(results, "utterances", None) or []
-    if utterances:
-        lines = []
-        for utt in utterances:
-            # Speaker 0 is assumed to be the agent (answers the call first)
-            label = "Agente" if utt.speaker == 0 else "Cliente"
-            lines.append(f"{label}: {utt.transcript}")
-        return "\n".join(lines)
-
-    # Fallback: plain transcript without diarization
-    channels = getattr(results, "channels", None) or []
-    if channels:
-        return channels[0].alternatives[0].transcript
-
-    return None
+    return _parse_transcript(response.results)
 
 
 async def transcribe_bytes(audio_bytes: bytes) -> str | None:
@@ -377,44 +450,22 @@ async def transcribe_bytes(audio_bytes: bytes) -> str | None:
         {"buffer": audio_bytes, "mimetype": "audio/x-wav"},
         options,
     )
-    results = response.results
-    print(f"[deepgram-bytes] results type={type(results)} utterances={bool(getattr(results, 'utterances', None))} channels={bool(getattr(results, 'channels', None))}")
-    if results:
-        channels = getattr(results, "channels", None) or []
-        if channels:
-            alt = channels[0].alternatives[0]
-            print(f"[deepgram-bytes] transcript={alt.transcript!r} confidence={getattr(alt, 'confidence', None)}")
-
-    utterances = getattr(results, "utterances", None) or []
-    if utterances:
-        lines = []
-        for utt in utterances:
-            label = "Agente" if utt.speaker == 0 else "Cliente"
-            lines.append(f"{label}: {utt.transcript}")
-        return "\n".join(lines)
-
-    channels = getattr(results, "channels", None) or []
-    if channels:
-        alt = channels[0].alternatives[0]
-        if alt.transcript:
-            return alt.transcript
-
-    return None
+    return _parse_transcript(response.results)
 
 
-async def post_note(contact_id: str, transcript: str):
+async def post_note(contact_id: str, transcript: str, loc_cfg: LocationConfig):
     body: dict = {"body": f"📞 Transcripción de llamada:\n\n{transcript}"}
-    if GHL_USER_ID:
-        body["userId"] = GHL_USER_ID
+    if loc_cfg.user_id:
+        body["userId"] = loc_cfg.user_id
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{GHL_BASE}/contacts/{contact_id}/notes",
-            headers=ghl_headers(version="2021-07-28"),
+            headers=ghl_headers(loc_cfg.api_key, version="2021-07-28"),
             json=body,
         )
 
     if resp.status_code not in (200, 201):
-        print(f"[{contact_id}] Note error {resp.status_code}: {resp.text[:300]}")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Note error {resp.status_code}: {resp.text[:300]}")
     else:
-        print(f"[{contact_id}] Note posted successfully")
+        print(f"[{loc_cfg.location_id}][{contact_id}] Note posted successfully")
