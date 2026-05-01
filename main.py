@@ -17,6 +17,9 @@ DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 MIN_CALL_DURATION = int(os.getenv("MIN_CALL_DURATION_SECONDS", "60"))
 RECORDING_DELAY = int(os.getenv("RECORDING_DELAY_SECONDS", "60"))
 
+# Tracks contact IDs currently being processed to prevent duplicate notes
+_processing: set[str] = set()
+
 GHL_BASE = "https://services.leadconnectorhq.com"
 
 
@@ -59,27 +62,34 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
+    if contact_id in _processing:
+        return {"status": "skipped", "reason": "already processing", "contactId": contact_id}
+
     background_tasks.add_task(process_call, contact_id)
     return {"status": "accepted", "contactId": contact_id}
 
 
 async def process_call(contact_id: str):
-    print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
-    await asyncio.sleep(RECORDING_DELAY)
+    _processing.add(contact_id)
+    try:
+        print(f"[{contact_id}] Waiting {RECORDING_DELAY}s for GHL to process recording...")
+        await asyncio.sleep(RECORDING_DELAY)
 
-    audio_url = await get_recording_url(contact_id)
-    if not audio_url:
-        print(f"[{contact_id}] No recording URL found — aborting")
-        return
+        audio_url = await get_recording_url(contact_id)
+        if not audio_url:
+            print(f"[{contact_id}] No recording URL found — aborting")
+            return
 
-    print(f"[{contact_id}] Transcribing: {audio_url}")
-    transcript = await transcribe(audio_url)
-    if not transcript:
-        print(f"[{contact_id}] Empty transcription — aborting")
-        return
+        print(f"[{contact_id}] Transcribing: {audio_url}")
+        transcript = await transcribe(audio_url)
+        if not transcript:
+            print(f"[{contact_id}] Empty transcription — aborting")
+            return
 
-    await post_note(contact_id, transcript)
-    print(f"[{contact_id}] Done")
+        await post_note(contact_id, transcript)
+        print(f"[{contact_id}] Done")
+    finally:
+        _processing.discard(contact_id)
 
 
 async def get_recording_url(contact_id: str) -> str | None:
@@ -124,7 +134,6 @@ async def transcribe(audio_url: str) -> str | None:
     options = PrerecordedOptions(
         model="nova-2",
         smart_format=True,
-        diarize=True,
         punctuate=True,
         language="es",
     )
@@ -132,16 +141,6 @@ async def transcribe(audio_url: str) -> str | None:
     response = deepgram.listen.rest.v("1").transcribe_url({"url": audio_url}, options)
     results = response.results
 
-    utterances = getattr(results, "utterances", None) or []
-    if utterances:
-        lines = []
-        for utt in utterances:
-            # Speaker 0 is assumed to be the agent (answers the call first)
-            label = "Agente" if utt.speaker == 0 else "Cliente"
-            lines.append(f"{label}: {utt.transcript}")
-        return "\n".join(lines)
-
-    # Fallback: plain transcript without diarization
     channels = getattr(results, "channels", None) or []
     if channels:
         return channels[0].alternatives[0].transcript
