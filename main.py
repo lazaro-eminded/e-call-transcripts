@@ -87,6 +87,8 @@ def load_locations() -> dict[str, LocationConfig]:
 
 LOCATIONS: dict[str, LocationConfig] = load_locations()
 
+_processing: set[str] = set()
+
 
 def ghl_headers(api_key: str, version: str = "2021-04-15") -> dict:
     return {
@@ -248,6 +250,10 @@ def _handle_webhook(payload: dict, loc_cfg: LocationConfig, background_tasks: Ba
     if not contact_id:
         raise HTTPException(status_code=400, detail="contactId not found in payload")
 
+    if contact_id in _processing:
+        print(f"[{loc_cfg.location_id}][{contact_id}] Duplicate webhook — already processing, skipped")
+        return {"status": "skipped", "reason": "already processing", "contactId": contact_id}
+
     recording_url = _find_recording_url(payload, custom_data)
     print(f"[{loc_cfg.location_id}][{contact_id}] Recording URL from payload: {recording_url!r}")
 
@@ -278,6 +284,14 @@ async def call_completed(request: Request, background_tasks: BackgroundTasks):
 
 
 async def process_call(contact_id: str, loc_cfg: LocationConfig, recording_url: str | bytes | None = None):
+    _processing.add(contact_id)
+    try:
+        await _process_call_inner(contact_id, loc_cfg, recording_url)
+    finally:
+        _processing.discard(contact_id)
+
+
+async def _process_call_inner(contact_id: str, loc_cfg: LocationConfig, recording_url: str | bytes | None = None):
     if recording_url:
         print(f"[{loc_cfg.location_id}][{contact_id}] Recording from webhook payload")
     else:
@@ -411,39 +425,9 @@ async def _fetch_recording_bytes(
 
 
 def _parse_transcript(results) -> str | None:
-    # Intento 1: utterances con diarización
-    utterances = getattr(results, "utterances", None) or []
-    if utterances:
-        lines = []
-        for utt in utterances:
-            label = "A" if utt.speaker == 0 else "B"
-            lines.append(f"{label}: {utt.transcript}")
-        return "\n".join(lines)
-
-    # Intento 2: palabras con speaker info (diarización a nivel palabra)
     channels = getattr(results, "channels", None) or []
     if channels:
-        words = getattr(channels[0].alternatives[0], "words", None) or []
-        if words and hasattr(words[0], "speaker") and words[0].speaker is not None:
-            lines = []
-            current_label = None
-            current_words = []
-            for word in words:
-                label = "A" if getattr(word, "speaker", 0) == 0 else "B"
-                if label != current_label:
-                    if current_words:
-                        lines.append(f"{current_label}: {' '.join(current_words)}")
-                    current_label = label
-                    current_words = [word.word]
-                else:
-                    current_words.append(word.word)
-            if current_words:
-                lines.append(f"{current_label}: {' '.join(current_words)}")
-            return "\n".join(lines)
-
-        # Último recurso: texto plano
         return channels[0].alternatives[0].transcript
-
     return None
 
 
@@ -452,8 +436,6 @@ async def transcribe(audio_url: str) -> str | None:
     options = PrerecordedOptions(
         model="nova-2",
         smart_format=True,
-        diarize=True,
-        utterances=True,
         punctuate=True,
         detect_language=True,
     )
@@ -466,8 +448,6 @@ async def transcribe_bytes(audio_bytes: bytes) -> str | None:
     options = PrerecordedOptions(
         model="nova-2",
         smart_format=True,
-        diarize=True,
-        utterances=True,
         punctuate=True,
         detect_language=True,
     )
