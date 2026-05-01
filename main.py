@@ -425,35 +425,52 @@ async def _fetch_recording_bytes(
 
 
 def _parse_transcript(results) -> str | None:
+    # Group consecutive utterances from the same speaker into one line
+    utterances = getattr(results, "utterances", None) or []
+    if utterances:
+        lines = []
+        current_speaker = None
+        current_parts: list[str] = []
+        for utt in utterances:
+            label = "A" if utt.speaker == 0 else "B"
+            if label != current_speaker:
+                if current_parts:
+                    lines.append(f"{current_speaker}: {' '.join(current_parts)}")
+                current_speaker = label
+                current_parts = [utt.transcript]
+            else:
+                current_parts.append(utt.transcript)
+        if current_parts:
+            lines.append(f"{current_speaker}: {' '.join(current_parts)}")
+        return "\n".join(lines)
+
     channels = getattr(results, "channels", None) or []
     if channels:
         return channels[0].alternatives[0].transcript
     return None
 
 
+_DEEPGRAM_OPTIONS = PrerecordedOptions(
+    model="nova-2",
+    smart_format=True,
+    diarize=True,
+    utterances=True,
+    punctuate=True,
+    detect_language=True,
+)
+
+
 async def transcribe(audio_url: str) -> str | None:
     deepgram = DeepgramClient(DEEPGRAM_API_KEY)
-    options = PrerecordedOptions(
-        model="nova-2",
-        smart_format=True,
-        punctuate=True,
-        detect_language=True,
-    )
-    response = deepgram.listen.rest.v("1").transcribe_url({"url": audio_url}, options)
+    response = deepgram.listen.rest.v("1").transcribe_url({"url": audio_url}, _DEEPGRAM_OPTIONS)
     return _parse_transcript(response.results)
 
 
 async def transcribe_bytes(audio_bytes: bytes) -> str | None:
     deepgram = DeepgramClient(DEEPGRAM_API_KEY)
-    options = PrerecordedOptions(
-        model="nova-2",
-        smart_format=True,
-        punctuate=True,
-        detect_language=True,
-    )
     response = deepgram.listen.rest.v("1").transcribe_file(
         {"buffer": audio_bytes, "mimetype": "audio/x-wav"},
-        options,
+        _DEEPGRAM_OPTIONS,
     )
     return _parse_transcript(response.results)
 
